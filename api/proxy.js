@@ -70,7 +70,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: "gpt-5.4-mini",
-          max_tokens: 1000,
+          max_completion_tokens: 1000,
           messages: [
             ...(system ? [{ role: "system", content: system }] : []),
             { role: "user", content: user },
