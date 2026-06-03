@@ -2,6 +2,9 @@
   "functions": {
     "api/proxy.js": {
       "maxDuration": 60
+    },
+    "api/quantum.js": {
+      "maxDuration": 30
     }
   }
 }
