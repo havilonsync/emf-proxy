@@ -53,7 +53,7 @@ export default async function handler(req, res) {
         }),
       });
       const d = await r.json();
-      if (d.error) throw new Error(`Claude: ${d.error.message}`);
+      if (!r.ok || d.error) throw new Error(`Claude ${r.status}: ${d.error?.message || r.statusText}`);
       result = {
         text: d.content.map(b => b.type === "text" ? b.text : "").join(""),
         tokIn: d.usage?.input_tokens || 0,
@@ -61,6 +61,7 @@ export default async function handler(req, res) {
       };
 
     } else if (model === "gpt4o") {
+      if (!process.env.OPENAI_KEY) throw new Error("GPT-4o: OPENAI_KEY not configured");
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -71,13 +72,13 @@ export default async function handler(req, res) {
           model: "gpt-4o",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system || "" },
+            ...(system ? [{ role: "system", content: system }] : []),
             { role: "user", content: user },
           ],
         }),
       });
       const d = await r.json();
-      if (d.error) throw new Error(`GPT-4o: ${d.error.message}`);
+      if (!r.ok || d.error) throw new Error(`GPT-4o ${r.status}: ${d.error?.message || r.statusText}`);
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
@@ -85,19 +86,23 @@ export default async function handler(req, res) {
       };
 
     } else if (model === "gemini") {
+      if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
+      const geminiMessages = [];
+      if (system) geminiMessages.push({ role: "user", parts: [{ text: system }] }, { role: "model", parts: [{ text: "Understood." }] });
+      geminiMessages.push({ role: "user", parts: [{ text: user }] });
       const r = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${process.env.GEMINI_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: `${system || ""}\n\n${user}` }] }],
+            contents: geminiMessages,
             generationConfig: { maxOutputTokens: 1000 },
           }),
         }
       );
       const d = await r.json();
-      if (d.error) throw new Error(`Gemini: ${d.error.message}`);
+      if (!r.ok || d.error) throw new Error(`Gemini ${r.status}: ${d.error?.message || r.statusText}`);
       result = {
         text: d.candidates[0].content.parts[0].text,
         tokIn: d.usageMetadata?.promptTokenCount || 0,
@@ -105,6 +110,7 @@ export default async function handler(req, res) {
       };
 
     } else if (model === "grok") {
+      if (!process.env.GROK_KEY) throw new Error("Grok: GROK_KEY not configured");
       const r = await fetch("https://api.x.ai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -112,16 +118,16 @@ export default async function handler(req, res) {
           "Authorization": `Bearer ${process.env.GROK_KEY}`,
         },
         body: JSON.stringify({
-          model: "grok-2-1212",
+          model: "grok-3",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system || "" },
+            ...(system ? [{ role: "system", content: system }] : []),
             { role: "user", content: user },
           ],
         }),
       });
       const d = await r.json();
-      if (d.error) throw new Error(`Grok: ${d.error.message}`);
+      if (!r.ok || d.error) throw new Error(`Grok ${r.status}: ${d.error?.message || r.statusText}`);
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
@@ -145,7 +151,7 @@ export default async function handler(req, res) {
         }),
       });
       const d = await r.json();
-      if (d.error) throw new Error(`DeepSeek: ${d.error.message}`);
+      if (!r.ok || d.error) throw new Error(`DeepSeek ${r.status}: ${d.error?.message || r.statusText}`);
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
