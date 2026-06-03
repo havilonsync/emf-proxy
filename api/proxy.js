@@ -89,11 +89,11 @@ export default async function handler(req, res) {
       if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
       const geminiBody = {
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { maxOutputTokens: 1000 },
+        generationConfig: { maxOutputTokens: 4096 },
       };
       if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
       const r = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
         {
           method: "POST",
           headers: {
