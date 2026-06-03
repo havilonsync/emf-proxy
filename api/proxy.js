@@ -1,6 +1,13 @@
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "1mb",
+    },
+  },
+};
+
 export default async function handler(req, res) {
-  // Allow requests from emfoundation.net
-  res.setHeader("Access-Control-Allow-Origin", "https://emfoundation.net");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -12,7 +19,20 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { model, system, user } = req.body;
+  let body = req.body;
+
+  // If body is a string, parse it
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch(e) {
+      return res.status(400).json({ error: "Invalid JSON body" });
+    }
+  }
+
+  const { model, system, user } = body || {};
+
+  if (!model || !user) {
+    return res.status(400).json({ error: "Missing model or user in request body" });
+  }
 
   try {
     let result;
@@ -28,7 +48,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 1000,
-          system,
+          system: system || "",
           messages: [{ role: "user", content: user }],
         }),
       });
@@ -51,7 +71,7 @@ export default async function handler(req, res) {
           model: "gpt-4o",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system },
+            { role: "system", content: system || "" },
             { role: "user", content: user },
           ],
         }),
@@ -71,7 +91,7 @@ export default async function handler(req, res) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: [{ role: "user", parts: [{ text: `${system}\n\n${user}` }] }],
+            contents: [{ role: "user", parts: [{ text: `${system || ""}\n\n${user}` }] }],
             generationConfig: { maxOutputTokens: 1000 },
           }),
         }
@@ -95,7 +115,7 @@ export default async function handler(req, res) {
           model: "grok-2-1212",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system },
+            { role: "system", content: system || "" },
             { role: "user", content: user },
           ],
         }),
@@ -119,7 +139,7 @@ export default async function handler(req, res) {
           model: "deepseek-chat",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system },
+            { role: "system", content: system || "" },
             { role: "user", content: user },
           ],
         }),
@@ -133,7 +153,7 @@ export default async function handler(req, res) {
       };
 
     } else {
-      return res.status(400).json({ error: "Unknown model" });
+      return res.status(400).json({ error: `Unknown model: ${model}` });
     }
 
     return res.status(200).json(result);
