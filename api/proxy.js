@@ -93,7 +93,7 @@ export default async function handler(req, res) {
       };
       if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
       const r = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
         {
           method: "POST",
           headers: {
