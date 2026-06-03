@@ -70,7 +70,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: "gpt-4o",
-          max_tokens: 1000,
+          max_completion_tokens: 1000,
           messages: [
             ...(system ? [{ role: "system", content: system }] : []),
             { role: "user", content: user },
@@ -87,16 +87,14 @@ export default async function handler(req, res) {
 
     } else if (model === "gemini") {
       if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
-      const geminiMessages = [];
-      if (system) geminiMessages.push({ role: "user", parts: [{ text: system }] }, { role: "model", parts: [{ text: "Understood." }] });
-      geminiMessages.push({ role: "user", parts: [{ text: user }] });
       const r = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            contents: geminiMessages,
+            ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+            contents: [{ role: "user", parts: [{ text: user }] }],
             generationConfig: { maxOutputTokens: 1000 },
           }),
         }
