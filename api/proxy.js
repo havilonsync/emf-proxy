@@ -89,7 +89,9 @@ export default async function handler(req, res) {
       if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
       const geminiBody = {
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { maxOutputTokens: 4096 },
+         generationConfig: {
+          maxOutputTokens: 8192,
+          thinkingConfig: { thinkingBudget: 0 },
       };
       if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
       const r = await fetch(
