@@ -1,10 +1,10 @@
 {
   "functions": {
     "api/proxy.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "api/quantum.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   }
 }
