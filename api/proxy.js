@@ -105,8 +105,14 @@ export default async function handler(req, res) {
       );
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(`Gemini ${r.status}: ${d.error?.message || r.statusText}`);
+      const cand = d.candidates?.[0];
+      if (!cand) {
+        throw new Error(`Gemini: no candidates returned (blockReason: ${d.promptFeedback?.blockReason || "none"})`);
+      }
+      const geminiText = (cand.content?.parts || []).map(p => p.text || "").join("");
       result = {
-        text: d.candidates[0].content.parts[0].text,
+        text: geminiText,
+        finishReason: cand.finishReason || "unknown",
         tokIn: d.usageMetadata?.promptTokenCount || 0,
         tokOut: d.usageMetadata?.candidatesTokenCount || 0,
       };
