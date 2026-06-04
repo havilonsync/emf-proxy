@@ -91,7 +91,7 @@ export default async function handler(req, res) {
         contents: [{ role: "user", parts: [{ text: user }] }],
          generationConfig: {
           maxOutputTokens: 8192,
-          thinkingConfig: { thinkingBudget: 0 },
+          },
       };
       if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
       const r = await fetch(
