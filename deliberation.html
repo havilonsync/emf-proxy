@@ -137,5 +137,45 @@ react-dom/cjs/react-dom-client.production.js:
    *)
 */
   </script>
-</body>
+<script>
+// Quantum Tier Patch — wires Braket endpoint to UI
+(function() {
+  function runBraket() {
+    var btn = document.querySelector('[data-quantum-active]') || 
+              document.getElementById('quantum-trigger');
+    var status = document.createElement('div');
+    status.style.cssText = 'position:fixed;bottom:20px;right:20px;background:#1E3A5F;border:1px solid #C9A84C;color:#C9A84C;padding:12px 18px;font-family:Georgia,serif;font-size:11px;letter-spacing:1px;z-index:9999';
+    status.textContent = 'Quantum task submitting…';
+    document.body.appendChild(status);
+    fetch('https://emf-proxy.vercel.app/api/braket', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({shots: 100})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      status.textContent = data.taskId 
+        ? 'Quantum task submitted: ' + data.taskId.slice(-8)
+        : 'Error: ' + (data.error || 'unknown');
+      setTimeout(function() { status.remove(); }, 5000);
+    })
+    .catch(function(e) {
+      status.textContent = 'Quantum error: ' + e.message;
+      setTimeout(function() { status.remove(); }, 5000);
+    });
+  }
+
+  // Watch for quantum tier button clicks
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el) {
+      if (el.textContent && el.textContent.trim() === 'Classical Only') {
+        runBraket();
+        break;
+      }
+      el = el.parentElement;
+    }
+  });
+})();
+</script></body>
 </html>
