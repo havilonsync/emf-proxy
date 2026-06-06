@@ -1,7 +1,8 @@
+import { BraketClient, CreateQuantumTaskCommand } from "@aws-sdk/client-braket";
+
 export const config = {
   api: { bodyParser: { sizeLimit: "1mb" } },
 };
-import { BraketClient, CreateQuantumTaskCommand } from "@aws-sdk/client-braket";
 
 const client = new BraketClient({
   region: process.env.AWS_BRAKET_REGION,
