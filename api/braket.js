@@ -23,11 +23,13 @@ export default async function handler(req, res) {
     const { circuit, device, shots = 100 } = req.body || {};
     const deviceArn = device || "arn:aws:braket:::device/quantum-simulator/amazon/sv1";
 
+    const defaultCircuit = `OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[2] c;\nh q[0];\ncnot q[0], q[1];\nc = measure q;`;
+
     const command = new CreateQuantumTaskCommand({
       deviceArn,
       openQasm: {
         braketSchemaHeader: { name: "braket.ir.openqasm.program", version: "1" },
-        source: circuit || `OPENQASM 3.0; qubit[2] q; bit[2] c; h q[0]; cnot q[0], q[1]; c = measure q;`,
+        source: circuit || defaultCircuit,
       },
       outputS3Bucket: "amazon-braket-emfoundation",
       outputS3KeyPrefix: "results",
