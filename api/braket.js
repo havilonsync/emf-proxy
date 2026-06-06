@@ -12,15 +12,7 @@ const client = new BraketClient({
   },
 });
 
-const DEFAULT_CIRCUIT = [
-  "OPENQASM 3.0;",
-  'include "stdgates.inc";',
-  "qubit[2] q;",
-  "bit[2] c;",
-  "h q[0];",
-  "cnot q[0], q[1];",
-  "c = measure q;"
-].join("\n");
+const DEFAULT_CIRCUIT = "OPENQASM 3;\nqubit[2] q;\nbit[2] c;\nh q[0];\ncnot q[0], q[1];\nc = measure q;";
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
