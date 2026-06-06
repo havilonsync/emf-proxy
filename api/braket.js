@@ -24,13 +24,17 @@ export default async function handler(req, res) {
   try {
     const { circuit, device, shots = 100 } = req.body || {};
     const deviceArn = device || "arn:aws:braket:::device/quantum-simulator/amazon/sv1";
+    const source = circuit || DEFAULT_CIRCUIT;
+
+    const action = JSON.stringify({
+      braketSchemaHeader: { name: "braket.ir.openqasm.program", version: "1" },
+      source,
+      inputs: {},
+    });
 
     const command = new CreateQuantumTaskCommand({
       deviceArn,
-      openQasm: {
-        braketSchemaHeader: { name: "braket.ir.openqasm.program", version: "1" },
-        source: circuit || DEFAULT_CIRCUIT,
-      },
+      action,
       outputS3Bucket: "amazon-braket-emfoundation",
       outputS3KeyPrefix: "results",
       shots,
