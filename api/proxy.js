@@ -6,14 +6,46 @@ export const config = {
   },
 };
 
-// Gemini retry wrapper — retries up to 3 times on 503 with exponential backoff
-async function fetchGeminiWithRetry(url, options, maxRetries = 3) {
+// ── Diagnostic logger ────────────────────────────────────────────────────────
+// Logs a structured line to Vercel Functions log for every model call.
+// View at: vercel.com → emf-proxy → Logs → filter by [proxy]
+function logCall({ provider, promptTokenEst, docCount, docCharCount, attempt, responseCode, responseTimeMs, error }) {
+  const status = error ? "FAIL" : "OK";
+  console.log(
+    `[proxy] provider=${provider} | status=${status}` +
+    ` | prompt_tok_est=${promptTokenEst}` +
+    ` | doc_count=${docCount}` +
+    ` | doc_chars=${docCharCount}` +
+    ` | attempt=${attempt}` +
+    ` | http=${responseCode}` +
+    ` | time_ms=${responseTimeMs}` +
+    (error ? ` | error="${error}"` : "")
+  );
+}
+
+// Rough token estimator — 1 token ≈ 4 chars for English text
+function estTokens(str) {
+  return Math.ceil((str || "").length / 4);
+}
+
+// Extract doc metrics from the system prompt
+// The injected doc block format is: "--- DOCUMENT: filename.pdf (12345 chars) ---"
+function parseDocMetrics(system) {
+  const docCount = (system.match(/--- DOCUMENT:/g) || []).length;
+  const charMatches = [...system.matchAll(/\((\d+) chars\)/g)];
+  const docCharCount = charMatches.reduce((sum, m) => sum + parseInt(m[1], 10), 0);
+  return { docCount, docCharCount };
+}
+
+// ── Gemini retry wrapper ─────────────────────────────────────────────────────
+async function fetchGeminiWithRetry(url, options, maxRetries, promptTokenEst, docCount, docCharCount) {
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const t0 = Date.now();
     const r = await fetch(url, options);
     const d = await r.json();
+    const responseTimeMs = Date.now() - t0;
 
-    // If 503 or "overloaded" error, wait and retry
     if (
       r.status === 503 ||
       (d.error && (
@@ -22,7 +54,9 @@ async function fetchGeminiWithRetry(url, options, maxRetries = 3) {
         (d.error.message && d.error.message.toLowerCase().includes("high demand"))
       ))
     ) {
-      lastError = new Error(`Gemini ${r.status}: ${d.error?.message || "Service temporarily unavailable"}`);
+      const errMsg = d.error?.message || "Service temporarily unavailable";
+      logCall({ provider: "Gemini", promptTokenEst, docCount, docCharCount, attempt, responseCode: r.status, responseTimeMs, error: errMsg });
+      lastError = new Error(`Gemini ${r.status}: ${errMsg}`);
       if (attempt < maxRetries) {
         const waitMs = attempt * 4000; // 4s, 8s, 12s
         console.warn(`[proxy] Gemini 503 on attempt ${attempt}/${maxRetries} — retrying in ${waitMs}ms`);
@@ -32,16 +66,20 @@ async function fetchGeminiWithRetry(url, options, maxRetries = 3) {
       throw lastError;
     }
 
-    // Any other error — throw immediately, no retry
     if (!r.ok || d.error) {
-      throw new Error(`Gemini ${r.status}: ${d.error?.message || r.statusText}`);
+      const errMsg = d.error?.message || r.statusText;
+      logCall({ provider: "Gemini", promptTokenEst, docCount, docCharCount, attempt, responseCode: r.status, responseTimeMs, error: errMsg });
+      throw new Error(`Gemini ${r.status}: ${errMsg}`);
     }
 
+    // Success
+    logCall({ provider: "Gemini", promptTokenEst, docCount, docCharCount, attempt, responseCode: r.status, responseTimeMs });
     return { r, d };
   }
   throw lastError;
 }
 
+// ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -56,7 +94,6 @@ export default async function handler(req, res) {
   }
 
   let body = req.body;
-
   if (typeof body === "string") {
     try { body = JSON.parse(body); } catch(e) {
       return res.status(400).json({ error: "Invalid JSON body" });
@@ -64,15 +101,22 @@ export default async function handler(req, res) {
   }
 
   const { model, system, user } = body || {};
-
   if (!model || !user) {
     return res.status(400).json({ error: "Missing model or user in request body" });
   }
 
+  // Compute shared metrics used in all log lines
+  const systemStr = system || "";
+  const userStr = user || "";
+  const promptTokenEst = estTokens(systemStr) + estTokens(userStr);
+  const { docCount, docCharCount } = parseDocMetrics(systemStr);
+
   try {
     let result;
 
+    // ── Claude ───────────────────────────────────────────────────────────────
     if (model === "claude") {
+      const t0 = Date.now();
       const r = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -83,20 +127,28 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
           max_tokens: 1000,
-          system: system || "",
-          messages: [{ role: "user", content: user }],
+          system: systemStr,
+          messages: [{ role: "user", content: userStr }],
         }),
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(`Claude ${r.status}: ${d.error?.message || r.statusText}`);
+      const responseTimeMs = Date.now() - t0;
+      if (!r.ok || d.error) {
+        const errMsg = d.error?.message || r.statusText;
+        logCall({ provider: "Claude", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs, error: errMsg });
+        throw new Error(`Claude ${r.status}: ${errMsg}`);
+      }
+      logCall({ provider: "Claude", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
       result = {
         text: d.content.map(b => b.type === "text" ? b.text : "").join(""),
         tokIn: d.usage?.input_tokens || 0,
         tokOut: d.usage?.output_tokens || 0,
       };
 
+    // ── GPT-4o ───────────────────────────────────────────────────────────────
     } else if (model === "gpt4o") {
       if (!process.env.OPENAI_KEY) throw new Error("GPT-4o: OPENAI_KEY not configured");
+      const t0 = Date.now();
       const r = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -107,28 +159,33 @@ export default async function handler(req, res) {
           model: "gpt-5.4-mini",
           max_completion_tokens: 1000,
           messages: [
-            ...(system ? [{ role: "system", content: system }] : []),
-            { role: "user", content: user },
+            ...(systemStr ? [{ role: "system", content: systemStr }] : []),
+            { role: "user", content: userStr },
           ],
         }),
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(`GPT-4o ${r.status}: ${d.error?.message || r.statusText}`);
+      const responseTimeMs = Date.now() - t0;
+      if (!r.ok || d.error) {
+        const errMsg = d.error?.message || r.statusText;
+        logCall({ provider: "GPT-4o", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs, error: errMsg });
+        throw new Error(`GPT-4o ${r.status}: ${errMsg}`);
+      }
+      logCall({ provider: "GPT-4o", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
         tokOut: d.usage?.completion_tokens || 0,
       };
 
+    // ── Gemini ───────────────────────────────────────────────────────────────
     } else if (model === "gemini") {
       if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
       const geminiBody = {
-        contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: {
-          maxOutputTokens: 8192,
-        },
+        contents: [{ role: "user", parts: [{ text: userStr }] }],
+        generationConfig: { maxOutputTokens: 8192 },
       };
-      if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
+      if (systemStr) geminiBody.systemInstruction = { parts: [{ text: systemStr }] };
 
       const { d } = await fetchGeminiWithRetry(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
@@ -139,23 +196,26 @@ export default async function handler(req, res) {
             "x-goog-api-key": process.env.GEMINI_KEY,
           },
           body: JSON.stringify(geminiBody),
-        }
+        },
+        3,
+        promptTokenEst,
+        docCount,
+        docCharCount
       );
 
       const cand = d.candidates?.[0];
-      if (!cand) {
-        throw new Error(`Gemini: no candidates returned (blockReason: ${d.promptFeedback?.blockReason || "none"})`);
-      }
-      const geminiText = (cand.content?.parts || []).map(p => p.text || "").join("");
+      if (!cand) throw new Error(`Gemini: no candidates returned (blockReason: ${d.promptFeedback?.blockReason || "none"})`);
       result = {
-        text: geminiText,
+        text: (cand.content?.parts || []).map(p => p.text || "").join(""),
         finishReason: cand.finishReason || "unknown",
         tokIn: d.usageMetadata?.promptTokenCount || 0,
         tokOut: d.usageMetadata?.candidatesTokenCount || 0,
       };
 
+    // ── Grok ─────────────────────────────────────────────────────────────────
     } else if (model === "grok") {
       if (!process.env.GROK_KEY) throw new Error("Grok: GROK_KEY not configured");
+      const t0 = Date.now();
       const r = await fetch("https://api.x.ai/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -166,20 +226,28 @@ export default async function handler(req, res) {
           model: "grok-3",
           max_tokens: 1000,
           messages: [
-            ...(system ? [{ role: "system", content: system }] : []),
-            { role: "user", content: user },
+            ...(systemStr ? [{ role: "system", content: systemStr }] : []),
+            { role: "user", content: userStr },
           ],
         }),
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(`Grok ${r.status}: ${d.error?.message || r.statusText}`);
+      const responseTimeMs = Date.now() - t0;
+      if (!r.ok || d.error) {
+        const errMsg = d.error?.message || r.statusText;
+        logCall({ provider: "Grok", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs, error: errMsg });
+        throw new Error(`Grok ${r.status}: ${errMsg}`);
+      }
+      logCall({ provider: "Grok", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
         tokOut: d.usage?.completion_tokens || 0,
       };
 
+    // ── DeepSeek ─────────────────────────────────────────────────────────────
     } else if (model === "deepseek") {
+      const t0 = Date.now();
       const r = await fetch("https://api.deepseek.com/chat/completions", {
         method: "POST",
         headers: {
@@ -190,13 +258,19 @@ export default async function handler(req, res) {
           model: "deepseek-chat",
           max_tokens: 1000,
           messages: [
-            { role: "system", content: system || "" },
-            { role: "user", content: user },
+            { role: "system", content: systemStr },
+            { role: "user", content: userStr },
           ],
         }),
       });
       const d = await r.json();
-      if (!r.ok || d.error) throw new Error(`DeepSeek ${r.status}: ${d.error?.message || r.statusText}`);
+      const responseTimeMs = Date.now() - t0;
+      if (!r.ok || d.error) {
+        const errMsg = d.error?.message || r.statusText;
+        logCall({ provider: "DeepSeek", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs, error: errMsg });
+        throw new Error(`DeepSeek ${r.status}: ${errMsg}`);
+      }
+      logCall({ provider: "DeepSeek", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,
@@ -210,7 +284,7 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
 
   } catch (err) {
-    console.error("[proxy error]", err);
+    console.error("[proxy error]", err.message || String(err));
     return res.status(500).json({ error: err.message || String(err) });
   }
 }
