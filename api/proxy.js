@@ -1,10 +1,46 @@
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: "1mb",
+      sizeLimit: "10mb",
     },
   },
 };
+
+// Gemini retry wrapper — retries up to 3 times on 503 with exponential backoff
+async function fetchGeminiWithRetry(url, options, maxRetries = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const r = await fetch(url, options);
+    const d = await r.json();
+
+    // If 503 or "overloaded" error, wait and retry
+    if (
+      r.status === 503 ||
+      (d.error && (
+        d.error.status === "UNAVAILABLE" ||
+        (d.error.message && d.error.message.toLowerCase().includes("overload")) ||
+        (d.error.message && d.error.message.toLowerCase().includes("high demand"))
+      ))
+    ) {
+      lastError = new Error(`Gemini ${r.status}: ${d.error?.message || "Service temporarily unavailable"}`);
+      if (attempt < maxRetries) {
+        const waitMs = attempt * 4000; // 4s, 8s, 12s
+        console.warn(`[proxy] Gemini 503 on attempt ${attempt}/${maxRetries} — retrying in ${waitMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+      throw lastError;
+    }
+
+    // Any other error — throw immediately, no retry
+    if (!r.ok || d.error) {
+      throw new Error(`Gemini ${r.status}: ${d.error?.message || r.statusText}`);
+    }
+
+    return { r, d };
+  }
+  throw lastError;
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -21,7 +57,6 @@ export default async function handler(req, res) {
 
   let body = req.body;
 
-  // If body is a string, parse it
   if (typeof body === "string") {
     try { body = JSON.parse(body); } catch(e) {
       return res.status(400).json({ error: "Invalid JSON body" });
@@ -89,24 +124,24 @@ export default async function handler(req, res) {
       if (!process.env.GEMINI_KEY) throw new Error("Gemini: GEMINI_KEY not configured");
       const geminiBody = {
         contents: [{ role: "user", parts: [{ text: user }] }],
-         generationConfig: {
+        generationConfig: {
           maxOutputTokens: 8192,
-          },
+        },
       };
       if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
-      const r = await fetch(
+
+      const { d } = await fetchGeminiWithRetry(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-goog-api-key": `${process.env.GEMINI_KEY}`,
+            "x-goog-api-key": process.env.GEMINI_KEY,
           },
           body: JSON.stringify(geminiBody),
         }
       );
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(`Gemini ${r.status}: ${d.error?.message || r.statusText}`);
+
       const cand = d.candidates?.[0];
       if (!cand) {
         throw new Error(`Gemini: no candidates returned (blockReason: ${d.promptFeedback?.blockReason || "none"})`);
