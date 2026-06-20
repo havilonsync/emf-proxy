@@ -1,3 +1,5 @@
+import { PRICE_PER_1M } from "./_lib/pricing.js";
+import { kv } from "@vercel/kv";
 import { estTokens, parseDocMetrics } from "./_lib/tokens.js";
 
 export const config = {
@@ -71,7 +73,7 @@ async function fetchGeminiWithRetry(url, options, maxRetries, promptTokenEst, do
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -93,11 +95,60 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing model or user in request body" });
   }
 
+  // Validate model before gate — prevents pre-deducting budget for an unknown model
+  const pricing = PRICE_PER_1M[model];
+  if (!pricing) {
+    return res.status(400).json({ error: `Unknown model: ${model}` });
+  }
+
   // Compute shared metrics used in all log lines
   const systemStr = system || "";
   const userStr = user || "";
   const promptTokenEst = estTokens(systemStr) + estTokens(userStr);
   const { docCount, docCharCount } = parseDocMetrics(systemStr);
+
+  // ── Session gate ─────────────────────────────────────────────────────────────
+  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!token) {
+    return res.status(401).json({
+      error: "missing_session_token",
+      message: "A session token is required. Purchase a session to continue.",
+    });
+  }
+
+  let rawRecord;
+  try {
+    rawRecord = await kv.get(`session:${token}`);
+  } catch (kvErr) {
+    console.error("[proxy] KV lookup failed:", kvErr.message);
+    return res.status(503).json({ error: "Session service unavailable. Please try again." });
+  }
+  if (!rawRecord) {
+    return res.status(401).json({
+      error: "invalid_session_token",
+      message: "Session token not found or expired.",
+    });
+  }
+
+  const record = typeof rawRecord === "string" ? JSON.parse(rawRecord) : rawRecord;
+  const estCallCost = (promptTokenEst * pricing.in + 1000 * pricing.out) / 1_000_000;
+
+  if (record.remainingBudgetUsd < estCallCost) {
+    return res.status(402).json({
+      error: "budget_exhausted",
+      message: "Your session budget is exhausted. Purchase a new session to continue.",
+      remainingBudgetUsd: +record.remainingBudgetUsd.toFixed(6),
+    });
+  }
+
+  // Pre-deduct before the provider call — reserves worst-case cost
+  record.remainingBudgetUsd = +(record.remainingBudgetUsd - estCallCost).toFixed(6);
+  try {
+    await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true });
+  } catch (kvErr) {
+    console.error("[proxy] pre-deduct write failed:", kvErr.message);
+    return res.status(503).json({ error: "Session service unavailable. Please try again." });
+  }
 
   try {
     let result;
@@ -269,9 +320,20 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: `Unknown model: ${model}` });
     }
 
+    // ── Settle actual cost ────────────────────────────────────────────────────
+    const actualCost = ((result.tokIn || 0) * pricing.in + (result.tokOut || 0) * pricing.out) / 1_000_000;
+    record.remainingBudgetUsd = +(record.remainingBudgetUsd + (estCallCost - actualCost)).toFixed(6);
+    record.actualCostUsd = +((record.actualCostUsd || 0) + actualCost).toFixed(6);
+    await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true }).catch(err =>
+      console.error("[proxy] budget settle failed (non-fatal):", err.message)
+    );
+
     return res.status(200).json(result);
 
   } catch (err) {
+    // Refund the pre-deducted estimate — provider failed, no actual usage
+    record.remainingBudgetUsd = +(record.remainingBudgetUsd + estCallCost).toFixed(6);
+    await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true }).catch(() => {});
     console.error("[proxy error]", err.message || String(err));
     return res.status(500).json({ error: err.message || String(err) });
   }
