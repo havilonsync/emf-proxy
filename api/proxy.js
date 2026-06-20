@@ -1,3 +1,5 @@
+import { estTokens, parseDocMetrics } from "./_lib/tokens.js";
+
 export const config = {
   api: {
     bodyParser: {
@@ -21,20 +23,6 @@ function logCall({ provider, promptTokenEst, docCount, docCharCount, attempt, re
     ` | time_ms=${responseTimeMs}` +
     (error ? ` | error="${error}"` : "")
   );
-}
-
-// Rough token estimator — 1 token ≈ 4 chars for English text
-function estTokens(str) {
-  return Math.ceil((str || "").length / 4);
-}
-
-// Extract doc metrics from the system prompt
-// The injected doc block format is: "--- DOCUMENT: filename.pdf (12345 chars) ---"
-function parseDocMetrics(system) {
-  const docCount = (system.match(/--- DOCUMENT:/g) || []).length;
-  const charMatches = [...system.matchAll(/\((\d+) chars\)/g)];
-  const docCharCount = charMatches.reduce((sum, m) => sum + parseInt(m[1], 10), 0);
-  return { docCount, docCharCount };
 }
 
 // ── Gemini retry wrapper ─────────────────────────────────────────────────────
@@ -223,7 +211,7 @@ export default async function handler(req, res) {
           "Authorization": `Bearer ${process.env.GROK_KEY}`,
         },
         body: JSON.stringify({
-          model: "grok-3",
+          model: "grok-4.3",
           max_tokens: 1000,
           messages: [
             ...(systemStr ? [{ role: "system", content: systemStr }] : []),
@@ -255,7 +243,7 @@ export default async function handler(req, res) {
           "Authorization": `Bearer ${process.env.DEEPSEEK_KEY}`,
         },
         body: JSON.stringify({
-          model: "deepseek-chat",
+          model: "deepseek-v4-flash",
           max_tokens: 1000,
           messages: [
             { role: "system", content: systemStr },
