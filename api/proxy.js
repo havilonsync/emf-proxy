@@ -69,6 +69,43 @@ async function fetchGeminiWithRetry(url, options, maxRetries, promptTokenEst, do
   throw lastError;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function writeSessionWithRetry({
+  token,
+  record,
+  operation,
+  amountUsd,
+  maxAttempts = 3,
+  baseBackoffMs = 120,
+}) {
+  let lastErr;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true });
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await sleep(baseBackoffMs * attempt);
+      }
+    }
+  }
+
+  const reconciliationErr = new Error("budget_reconciliation_failed");
+  reconciliationErr.code = "budget_reconciliation_failed";
+  reconciliationErr.detail = {
+    token,
+    operation,
+    amountUsd: +Number(amountUsd || 0).toFixed(6),
+    kvError: lastErr?.message || String(lastErr),
+  };
+  throw reconciliationErr;
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -324,16 +361,52 @@ export default async function handler(req, res) {
     const actualCost = ((result.tokIn || 0) * pricing.in + (result.tokOut || 0) * pricing.out) / 1_000_000;
     record.remainingBudgetUsd = +(record.remainingBudgetUsd + (estCallCost - actualCost)).toFixed(6);
     record.actualCostUsd = +((record.actualCostUsd || 0) + actualCost).toFixed(6);
-    await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true }).catch(err =>
-      console.error("[proxy] budget settle failed (non-fatal):", err.message)
-    );
+
+    try {
+      await writeSessionWithRetry({
+        token,
+        record,
+        operation: "settle",
+        amountUsd: actualCost,
+      });
+    } catch (settleErr) {
+      // Result is real and already paid for — do not discard successful model output.
+      const detail = settleErr?.detail || {
+        token,
+        operation: "settle",
+        amountUsd: +actualCost.toFixed(6),
+        kvError: settleErr?.message || String(settleErr),
+      };
+      console.error("[proxy] settle write failed after successful call:", JSON.stringify(detail));
+      return res.status(200).json(result);
+    }
 
     return res.status(200).json(result);
 
   } catch (err) {
     // Refund the pre-deducted estimate — provider failed, no actual usage
     record.remainingBudgetUsd = +(record.remainingBudgetUsd + estCallCost).toFixed(6);
-    await kv.set(`session:${token}`, JSON.stringify(record), { keepTtl: true }).catch(() => {});
+    try {
+      await writeSessionWithRetry({
+        token,
+        record,
+        operation: "refund",
+        amountUsd: estCallCost,
+      });
+    } catch (refundErr) {
+      const detail = refundErr?.detail || {
+        token,
+        operation: "refund",
+        amountUsd: +estCallCost.toFixed(6),
+        kvError: refundErr?.message || String(refundErr),
+      };
+      console.error("[proxy] refund write failed after provider error:", JSON.stringify(detail));
+      return res.status(503).json({
+        error: "budget_reconciliation_failed",
+        message: "Model call failed and budget reconciliation could not be completed. Please retry shortly.",
+      });
+    }
+
     console.error("[proxy error]", err.message || String(err));
     return res.status(500).json({ error: err.message || String(err) });
   }
