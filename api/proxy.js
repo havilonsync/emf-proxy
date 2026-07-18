@@ -10,6 +10,20 @@ export const config = {
   },
 };
 
+// Per-model expected output tokens used only for pre-flight estimation.
+// Tune these values as real usage data evolves.
+const ESTIMATED_OUTPUT_TOKENS = {
+  claude: 1000,
+  gpt4o: 1000,
+  gemini: 3200,
+  grok: 1000,
+  deepseek: 1000,
+};
+
+// Additional headroom for pre-flight budget checks only.
+// Settlement still uses real provider usage.
+const PRE_FLIGHT_SAFETY_MULTIPLIER = 1.2;
+
 // ── Diagnostic logger ────────────────────────────────────────────────────────
 // Logs a structured line to Vercel Functions log for every model call.
 // View at: vercel.com → emf-proxy → Logs → filter by [proxy]
@@ -168,9 +182,13 @@ export default async function handler(req, res) {
   }
 
   const record = typeof rawRecord === "string" ? JSON.parse(rawRecord) : rawRecord;
-  const estCallCost = (promptTokenEst * pricing.in + 1000 * pricing.out) / 1_000_000;
+  const expectedOutputTokens = ESTIMATED_OUTPUT_TOKENS[model] ?? 1000;
+  const estCallCost = (promptTokenEst * pricing.in + expectedOutputTokens * pricing.out) / 1_000_000;
+  // Gate with safety headroom to reduce mid-session budget_exhausted surprises.
+  // This does not change what is actually settled/charged after the call.
+  const preFlightRequiredBudgetUsd = estCallCost * PRE_FLIGHT_SAFETY_MULTIPLIER;
 
-  if (record.remainingBudgetUsd < estCallCost) {
+  if (record.remainingBudgetUsd < preFlightRequiredBudgetUsd) {
     return res.status(402).json({
       error: "budget_exhausted",
       message: "Your session budget is exhausted. Purchase a new session to continue.",
