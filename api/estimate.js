@@ -13,9 +13,16 @@ const QUANTUM_ADDON_USD = {
 };
 
 const VALID_MODELS  = new Set(Object.keys(PRICE_PER_1M));
-const OUT_EST       = 800;   // estimated output tokens per call (80% of 1000 cap)
-const MARGIN        = 1.15;  // 15% safety buffer covers chars/4 estimator roughness
-const STRIPE_MIN    = 0.50;  // Stripe minimum charge in USD
+const ESTIMATED_OUTPUT_TOKENS = {
+  claude: 1000,
+  gpt4o: 1000,
+  gemini: 3200,
+  grok: 1000,
+  deepseek: 1000,
+};
+// Keep checkout estimate safety margin in sync with proxy pre-flight gate.
+const ESTIMATE_SAFETY_MULTIPLIER = 1.2;
+const STRIPE_MIN = 0.50;  // Stripe minimum charge in USD
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -57,33 +64,39 @@ export default async function handler(req, res) {
   const heaviestModel = models.reduce((best, m) =>
     PRICE_PER_1M[m].out > PRICE_PER_1M[best].out ? m : best
   );
+  const heaviestOutEst = ESTIMATED_OUTPUT_TOKENS[heaviestModel] ?? 1000;
+  const outputTokPerRound = models.reduce(
+    (sum, m) => sum + (ESTIMATED_OUTPUT_TOKENS[m] ?? 1000),
+    0
+  ) + (redTeam ? heaviestOutEst : 0);
 
   let aiCallsUsd     = 0;
   let totalModelCalls = 0;
 
   for (let r = 1; r <= R; r++) {
     // Each round's input grows because it includes all prior rounds' outputs
-    const inputThisRound = inputBase + (r - 1) * N * OUT_EST;
+    const inputThisRound = inputBase + (r - 1) * outputTokPerRound;
 
     for (const m of models) {
       const p = PRICE_PER_1M[m];
-      aiCallsUsd += (inputThisRound * p.in + OUT_EST * p.out) / 1_000_000;
+      const outEst = ESTIMATED_OUTPUT_TOKENS[m] ?? 1000;
+      aiCallsUsd += (inputThisRound * p.in + outEst * p.out) / 1_000_000;
       totalModelCalls++;
     }
 
     if (redTeam) {
       const p = PRICE_PER_1M[heaviestModel];
-      aiCallsUsd += (inputThisRound * p.in + OUT_EST * p.out) / 1_000_000;
+      aiCallsUsd += (inputThisRound * p.in + heaviestOutEst * p.out) / 1_000_000;
       totalModelCalls++;
     }
   }
 
   const quantumAddonUsd = QUANTUM_ADDON_USD[quantumTier] ?? 0;
   const rawTotal        = aiCallsUsd + quantumAddonUsd;
-  const marginUsd       = rawTotal * (MARGIN - 1);
+  const marginUsd       = rawTotal * (ESTIMATE_SAFETY_MULTIPLIER - 1);
   const estimatedCostUsd = Math.max(
     STRIPE_MIN,
-    Math.ceil(rawTotal * MARGIN * 100) / 100
+    Math.ceil(rawTotal * ESTIMATE_SAFETY_MULTIPLIER * 100) / 100
   );
 
   return res.status(200).json({
@@ -95,8 +108,12 @@ export default async function handler(req, res) {
       totalRounds:     R,
       totalModelCalls,
       baseInputTokEst: inputBase,
-      avgInputTokEst:  Math.round(inputBase + ((R - 1) / 2) * N * OUT_EST),
-      outEstPerCall:   OUT_EST,
+      avgInputTokEst:  Math.round(inputBase + ((R - 1) / 2) * outputTokPerRound),
+      outEstPerCallByModel: models.reduce((acc, m) => {
+        acc[m] = ESTIMATED_OUTPUT_TOKENS[m] ?? 1000;
+        return acc;
+      }, {}),
+      outputTokGrowthPerRound: outputTokPerRound,
       docCount,
       docCharCount,
     },
