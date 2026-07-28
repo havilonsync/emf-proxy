@@ -48,6 +48,23 @@ export default async function handler(req, res) {
   const session = event.data.object;
   const meta    = session.metadata;
 
+  // Only process checkout sessions that match the MMDE payload shape.
+  // Anything else is unrelated to emf-proxy and should no-op cleanly.
+  if (
+    !meta ||
+    meta.models === undefined ||
+    meta.rounds === undefined ||
+    meta.redTeam === undefined ||
+    meta.quantumTier === undefined ||
+    meta.docCount === undefined ||
+    meta.docCharCount === undefined ||
+    !session.payment_intent ||
+    typeof session.amount_total !== "number" ||
+    session.amount_total <= 0
+  ) {
+    return res.status(200).json({ received: true });
+  }
+
   const token   = randomBytes(8).toString("hex");  // 16-char opaque token
   const paidUsd = session.amount_total / 100;      // Stripe stores cents
 
