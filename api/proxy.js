@@ -18,6 +18,7 @@ const ESTIMATED_OUTPUT_TOKENS = {
   gemini: 3200,
   grok: 1000,
   deepseek: 1000,
+  glm: 1000,
 };
 
 // Additional headroom for pre-flight budget checks only.
@@ -365,6 +366,39 @@ export default async function handler(req, res) {
         throw new Error(`DeepSeek ${r.status}: ${errMsg}`);
       }
       logCall({ provider: "DeepSeek", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
+      result = {
+        text: d.choices[0].message.content,
+        tokIn: d.usage?.prompt_tokens || 0,
+        tokOut: d.usage?.completion_tokens || 0,
+      };
+
+    // ── GLM ────────────────────────────────────────────────────────────────
+    } else if (model === "glm") {
+      if (!process.env.OPENROUTER_KEY) throw new Error("GLM: OPENROUTER_KEY not configured");
+      const t0 = Date.now();
+      const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.OPENROUTER_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "z-ai/glm-5.2",
+          max_completion_tokens: 1000,
+          messages: [
+            ...(systemStr ? [{ role: "system", content: systemStr }] : []),
+            { role: "user", content: userStr },
+          ],
+        }),
+      });
+      const d = await r.json();
+      const responseTimeMs = Date.now() - t0;
+      if (!r.ok || d.error) {
+        const errMsg = d.error?.message || r.statusText;
+        logCall({ provider: "GLM", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs, error: errMsg });
+        throw new Error(`GLM ${r.status}: ${errMsg}`);
+      }
+      logCall({ provider: "GLM", promptTokenEst, docCount, docCharCount, attempt: 1, responseCode: r.status, responseTimeMs });
       result = {
         text: d.choices[0].message.content,
         tokIn: d.usage?.prompt_tokens || 0,

@@ -10,4 +10,5 @@ export const PRICE_PER_1M = {
   gemini:   { in: 1.50,  out:  9.00 },
   grok:     { in: 1.25,  out:  2.50 },
   deepseek: { in: 0.14,  out:  0.28 },
+  glm:      { in: 0.76,  out:  2.42 },
 };

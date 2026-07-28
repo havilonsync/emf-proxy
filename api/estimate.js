@@ -19,6 +19,7 @@ const ESTIMATED_OUTPUT_TOKENS = {
   gemini: 3200,
   grok: 1000,
   deepseek: 1000,
+  glm: 1000,
 };
 // Keep checkout estimate safety margin in sync with proxy pre-flight gate.
 const ESTIMATE_SAFETY_MULTIPLIER = 1.2;
