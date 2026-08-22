@@ -8,6 +8,14 @@ export const config = {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// session_id is the only access gate on this endpoint (see CORS comment
+// below) and never expires on Stripe's side, so this endpoint enforces its
+// own expiry against the charge's actual paid_at — not the checkout
+// session's created time, which for a recurring donation reflects only the
+// original signup and would make every renewal's receipt link expire
+// almost immediately even though each renewal has its own fresh paid_at.
+const RECEIPT_LINK_EXPIRY_MS = 48 * 60 * 60 * 1000; // 48 hours
+
 // Unlike create-donation-checkout (returns only a Stripe redirect URL) and
 // stripe-webhook (server-to-server, no CORS header at all), this endpoint
 // returns the donor's name gated only by knowledge of the checkout session
@@ -64,6 +72,10 @@ export default async function handler(req, res) {
   if (!row) {
     // Webhook hasn't processed yet — normal in the seconds right after redirect.
     return res.status(202).json({ status: "pending" });
+  }
+
+  if (Date.now() - new Date(row.paid_at).getTime() > RECEIPT_LINK_EXPIRY_MS) {
+    return res.status(410).json({ status: "expired" });
   }
 
   const { structured } = buildReceiptContent(row);
