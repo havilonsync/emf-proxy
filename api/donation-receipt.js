@@ -8,8 +8,22 @@ export const config = {
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// Unlike create-donation-checkout (returns only a Stripe redirect URL) and
+// stripe-webhook (server-to-server, no CORS header at all), this endpoint
+// returns the donor's name gated only by knowledge of the checkout session
+// id. Wildcard CORS would let any origin that obtains a session id read
+// that PII cross-origin, so this is locked to the actual frontend origin(s).
+const ALLOWED_ORIGINS = new Set([
+  "https://emfoundation.net",
+  "https://www.emfoundation.net",
+]);
+
 export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
