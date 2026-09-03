@@ -6,10 +6,14 @@ export const config = {
 };
 
 const QUANTUM_ADDON_USD = {
-  none:     0.00,
-  basic:    0.90,   // midpoint of $0.85–0.95
-  standard: 3.85,   // midpoint of $3.50–4.20
-  premium:  4.50,
+  none:      0.00,
+  ibm_hyp:   0.85,
+  aws_hyp:   0.95,
+  goog_hyp:  0.90,
+  ibm_full:  3.50,
+  aws_full:  4.20,
+  goog_full: 3.80,
+  all:       4.50,
 };
 
 const VALID_MODELS  = new Set(Object.keys(PRICE_PER_1M));
@@ -41,7 +45,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const { models, rounds, redTeam, system, user, quantumTier } = body || {};
+  const { models, rounds, redTeam, system, user, quantumTier, authDocs, refDocs } = body || {};
 
   if (!Array.isArray(models) || models.length === 0)
     return res.status(400).json({ error: "models must be a non-empty array" });
@@ -56,27 +60,41 @@ export default async function handler(req, res) {
 
   const systemStr = system || "";
   const userStr   = user   || "";
-  const N         = models.length;
+  const authoritativeDocs = Array.isArray(authDocs) ? authDocs : [];
+  const referenceDocs     = Array.isArray(refDocs) ? refDocs : [];
+  const docs               = [...authoritativeDocs, ...referenceDocs];
+  const truncateDocument = (content, max) => {
+    const value = content || "";
+    return value.length <= max
+      ? value
+      : `${value.slice(0, max)}\n\n[DOCUMENT TRUNCATED — original length: ${value.length} characters]`;
+  };
+  const docsStr = [
+    ...authoritativeDocs.map(doc => truncateDocument(doc?.content, 60_000)),
+    ...referenceDocs.map(doc => truncateDocument(doc?.content, 30_000)),
+  ].join("\n");
 
-  const inputBase              = estTokens(systemStr) + estTokens(userStr);
-  const { docCount, docCharCount } = parseDocMetrics(systemStr);
+  const documentTokens         = estTokens(docsStr);
+  const promptTokens           = estTokens(systemStr) + estTokens(userStr);
+  const inputBase              = promptTokens + documentTokens;
+  const systemDocMetrics       = parseDocMetrics(systemStr);
+  const docCount               = systemDocMetrics.docCount + docs.length;
+  const docCharCount           = systemDocMetrics.docCharCount + docsStr.length;
 
-  // For red team: use the model with the highest output rate (most conservative cost estimate)
-  const heaviestModel = models.reduce((best, m) =>
-    PRICE_PER_1M[m].out > PRICE_PER_1M[best].out ? m : best
-  );
-  const heaviestOutEst = ESTIMATED_OUTPUT_TOKENS[heaviestModel] ?? 1000;
   const outputTokPerRound = models.reduce(
     (sum, m) => sum + (ESTIMATED_OUTPUT_TOKENS[m] ?? 1000),
     0
-  ) + (redTeam ? heaviestOutEst : 0);
+  );
 
   let aiCallsUsd     = 0;
   let totalModelCalls = 0;
 
-  for (let r = 1; r <= R; r++) {
-    // Each round's input grows because it includes all prior rounds' outputs
-    const inputThisRound = inputBase + (r - 1) * outputTokPerRound;
+  // Round 0 includes documents. Later rounds receive only the immediately
+  // preceding round's outputs, so their estimated input overhead stays flat.
+  for (let r = 0; r <= R; r++) {
+    const inputThisRound = r === 0
+      ? inputBase
+      : promptTokens + outputTokPerRound;
 
     for (const m of models) {
       const p = PRICE_PER_1M[m];
@@ -84,12 +102,26 @@ export default async function handler(req, res) {
       aiCallsUsd += (inputThisRound * p.in + outEst * p.out) / 1_000_000;
       totalModelCalls++;
     }
+  }
 
-    if (redTeam) {
-      const p = PRICE_PER_1M[heaviestModel];
-      aiCallsUsd += (inputThisRound * p.in + heaviestOutEst * p.out) / 1_000_000;
+  // Red team calls every selected model once against the emerging consensus.
+  if (redTeam) {
+    const redTeamInput = outputTokPerRound;
+    for (const m of models) {
+      const p = PRICE_PER_1M[m];
+      const outEst = ESTIMATED_OUTPUT_TOKENS[m] ?? 1000;
+      aiCallsUsd += (redTeamInput * p.in + outEst * p.out) / 1_000_000;
       totalModelCalls++;
     }
+  }
+
+  // Consensus synthesis and scorecard generation are two final Claude calls.
+  const finalInput = promptTokens + outputTokPerRound;
+  for (let i = 0; i < 2; i++) {
+    const p = PRICE_PER_1M.claude;
+    const outEst = ESTIMATED_OUTPUT_TOKENS.claude;
+    aiCallsUsd += (finalInput * p.in + outEst * p.out) / 1_000_000;
+    totalModelCalls++;
   }
 
   const quantumAddonUsd = QUANTUM_ADDON_USD[quantumTier] ?? 0;
@@ -109,7 +141,10 @@ export default async function handler(req, res) {
       totalRounds:     R,
       totalModelCalls,
       baseInputTokEst: inputBase,
-      avgInputTokEst:  Math.round(inputBase + ((R - 1) / 2) * outputTokPerRound),
+      documentTokEst:  documentTokens,
+      avgInputTokEst:  Math.round(
+        (inputBase + R * (promptTokens + outputTokPerRound)) / (R + 1)
+      ),
       outEstPerCallByModel: models.reduce((acc, m) => {
         acc[m] = ESTIMATED_OUTPUT_TOKENS[m] ?? 1000;
         return acc;
